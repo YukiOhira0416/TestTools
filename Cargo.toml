@@ -1,0 +1,12 @@
+[package]
+name = "video-player-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slint = "1.9"
+rfd = "0.15"
+image = "0.25"
+
+[build-dependencies]
+slint-build = "1.9"
