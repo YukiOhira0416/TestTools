@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::process::{Command, Stdio, Child};
 use std::io::Read;
 use image::RgbaImage;
@@ -9,6 +9,7 @@ use image::RgbaImage;
 pub struct VideoPlayer {
     pub duration: f32,
     pub is_playing: Arc<Mutex<bool>>,
+    pub is_paused: Arc<Mutex<bool>>,
     pub current_time: Arc<Mutex<f32>>,
     pub current_frame: Arc<Mutex<Option<RgbaImage>>>,
     pub seek_time: Arc<Mutex<Option<f32>>>,
@@ -26,6 +27,7 @@ impl VideoPlayer {
         Self {
             duration: 0.0,
             is_playing: Arc::new(Mutex::new(false)),
+            is_paused: Arc::new(Mutex::new(false)),
             current_time: Arc::new(Mutex::new(0.0)),
             current_frame: Arc::new(Mutex::new(None)),
             seek_time: Arc::new(Mutex::new(None)),
@@ -150,8 +152,18 @@ impl VideoPlayer {
     }
 
     pub fn play(&mut self) -> Result<(), String> {
+        // 一時停止からの再開
+        if *self.is_paused.lock().unwrap() {
+            *self.is_paused.lock().unwrap() = false;
+            *self.is_playing.lock().unwrap() = true;
+            self.start_audio_playback()?;
+            println!("一時停止から再開");
+            return Ok(());
+        }
+        
         if let Some(path) = &self.video_path {
             *self.is_playing.lock().unwrap() = true;
+            *self.is_paused.lock().unwrap() = false;
             
             // 再生世代をインクリメント
             let generation = {
@@ -162,6 +174,7 @@ impl VideoPlayer {
             
             let path_str = path.to_str().unwrap().to_string();
             let is_playing = Arc::clone(&self.is_playing);
+            let is_paused = Arc::clone(&self.is_paused);
             let current_time = Arc::clone(&self.current_time);
             let current_frame = Arc::clone(&self.current_frame);
             let seek_time = Arc::clone(&self.seek_time);
@@ -175,7 +188,7 @@ impl VideoPlayer {
             
             // 別スレッドで動画を再生
             thread::spawn(move || {
-                Self::play_video_with_frames(&path_str, is_playing, current_time, current_frame, seek_time, playback_generation, generation, duration, width, height);
+                Self::play_video_with_frames(&path_str, is_playing, is_paused, current_time, current_frame, seek_time, playback_generation, generation, duration, width, height);
             });
             
             Ok(())
@@ -187,6 +200,7 @@ impl VideoPlayer {
     fn play_video_with_frames(
         path: &str,
         is_playing: Arc<Mutex<bool>>,
+        is_paused: Arc<Mutex<bool>>,
         current_time: Arc<Mutex<f32>>,
         current_frame: Arc<Mutex<Option<RgbaImage>>>,
         seek_time: Arc<Mutex<Option<f32>>>,
@@ -241,6 +255,10 @@ impl VideoPlayer {
         let mut stdout = child.stdout.take().unwrap();
         let start_time = Instant::now();
         
+        // 一時停止時間の追跡
+        let mut pause_start: Option<Instant> = None;
+        let mut total_paused_secs: f32 = 0.0;
+        
         // 1フレームのサイズを計算（RGBA = 4バイト/ピクセル）
         let frame_size = (width * height * 4) as usize;
         let mut frame_buffer = vec![0u8; frame_size];
@@ -261,13 +279,27 @@ impl VideoPlayer {
                 break;
             }
             
+            // 一時停止チェック: ffmpegプロセスは生かしたまま待機（停止チェックより先）
+            if *is_paused.lock().unwrap() {
+                if pause_start.is_none() {
+                    pause_start = Some(Instant::now());
+                }
+                thread::sleep(Duration::from_millis(30));
+                continue;
+            } else if let Some(ps) = pause_start.take() {
+                // 一時停止から復帰: 停止していた時間を累積
+                total_paused_secs += ps.elapsed().as_secs_f32();
+                println!("一時停止から復帰（停止時間: {:.2}秒, 累積: {:.2}秒）", ps.elapsed().as_secs_f32(), total_paused_secs);
+            }
+            
+            // 停止チェック（一時停止でない場合のみ到達）
             if !*is_playing.lock().unwrap() {
                 let _ = child.kill();
                 println!("再生を停止しました");
                 break;
             }
 
-            let elapsed = start_time.elapsed().as_secs_f32() + start_position;
+            let elapsed = start_time.elapsed().as_secs_f32() - total_paused_secs + start_position;
             *current_time.lock().unwrap() = elapsed;
 
             if elapsed >= duration && duration > 0.0 {
@@ -311,15 +343,16 @@ impl VideoPlayer {
     }
 
     pub fn pause(&mut self) {
-        // 現在の再生位置を保存して、再開時にその位置から再生できるようにする
-        let current = *self.current_time.lock().unwrap();
-        *self.seek_time.lock().unwrap() = Some(current);
+        // is_playing=false（UI同期用）、is_paused=true（スレッド維持用）
         *self.is_playing.lock().unwrap() = false;
+        *self.is_paused.lock().unwrap() = true;
         self.stop_audio();
-        println!("一時停止（位置: {}秒）", current);
+        let current = *self.current_time.lock().unwrap();
+        println!("一時停止（位置: {:.2}秒）", current);
     }
 
     pub fn stop(&mut self) {
+        *self.is_paused.lock().unwrap() = false;
         *self.is_playing.lock().unwrap() = false;
         *self.current_time.lock().unwrap() = 0.0;
         self.stop_audio();
@@ -333,7 +366,10 @@ impl VideoPlayer {
     }
 
     pub fn seek(&mut self, time: f32) {
-        let was_playing = self.is_playing();
+        let was_playing = self.is_playing() || *self.is_paused.lock().unwrap();
+        
+        // 一時停止状態をクリア
+        *self.is_paused.lock().unwrap() = false;
         
         // 世代番号をインクリメント（古いスレッドを無効化）
         *self.playback_generation.lock().unwrap() += 1;
