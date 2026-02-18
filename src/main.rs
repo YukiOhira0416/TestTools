@@ -1,5 +1,6 @@
 use slint::*;
 use std::sync::{Arc, Mutex};
+use device_query::{DeviceQuery, DeviceState, Keycode};
 
 mod player;
 use player::VideoPlayer;
@@ -7,6 +8,10 @@ use player::VideoPlayer;
 slint::include_modules!();
 
 fn main() {
+    // 高DPIスケーリングを無効化（実ピクセルで動作）
+    std::env::set_var("SLINT_SCALE_FACTOR", "1.0");
+    std::env::set_var("WINIT_HIDPI_FACTOR", "1.0");
+    
     let ui = VideoPlayerUI::new().unwrap();
     
     // 動画プレイヤーのインスタンスを作成
@@ -106,9 +111,16 @@ fn main() {
         player.set_volume(volume);
     });
     
+    // キーボード状態を監視するためのデバイス
+    let device_state = DeviceState::new();
+    
+    // Ctrl+Alt押下の前回状態を記憶（連続トグル防止）
+    let last_fullscreen_key_pressed = Arc::new(Mutex::new(false));
+    
     // 再生時間とフレーム更新用タイマー
     let ui_weak = ui.as_weak();
     let player_clone = Arc::clone(&video_player);
+    let last_key_pressed = Arc::clone(&last_fullscreen_key_pressed);
     let timer = Timer::default();
     timer.start(
         TimerMode::Repeated,
@@ -117,12 +129,35 @@ fn main() {
             let ui = ui_weak.unwrap();
             let player = player_clone.lock().unwrap();
             
-            // 現在の再生時間を更新
+            // キーボードショートカットチェック（Ctrl + Alt）
+            let keys = device_state.get_keys();
+            let ctrl_pressed = keys.contains(&Keycode::LControl) || keys.contains(&Keycode::RControl);
+            let alt_pressed = keys.contains(&Keycode::LAlt) || keys.contains(&Keycode::RAlt);
+            let fullscreen_key_combo = ctrl_pressed && alt_pressed;
+            
+            let mut last_pressed = last_key_pressed.lock().unwrap();
+            if fullscreen_key_combo && !*last_pressed {
+                // Ctrl+Altが押された（エッジ検出）
+                let current_mode = ui.get_fullscreen_mode();
+                let new_mode = !current_mode;
+                ui.set_fullscreen_mode(new_mode);
+                // モニタ全体のフルスクリーン切替
+                ui.window().set_fullscreen(new_mode);
+                *last_pressed = true;
+            } else if !fullscreen_key_combo {
+                // キーが離された
+                *last_pressed = false;
+            }
+            drop(last_pressed);
+            
+            // 現在の再生時間を更新（再生中のみ）
+            let is_playing = player.is_playing();
             let current = player.get_current_time();
-            ui.set_current_time(current);
+            if is_playing {
+                ui.set_current_time(current);
+            }
             
             // 再生状態を同期
-            let is_playing = player.is_playing();
             if ui.get_is_playing() != is_playing {
                 ui.set_is_playing(is_playing);
             }

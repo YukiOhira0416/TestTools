@@ -311,9 +311,12 @@ impl VideoPlayer {
     }
 
     pub fn pause(&mut self) {
+        // 現在の再生位置を保存して、再開時にその位置から再生できるようにする
+        let current = *self.current_time.lock().unwrap();
+        *self.seek_time.lock().unwrap() = Some(current);
         *self.is_playing.lock().unwrap() = false;
         self.stop_audio();
-        println!("一時停止");
+        println!("一時停止（位置: {}秒）", current);
     }
 
     pub fn stop(&mut self) {

@@ -1,0 +1,494 @@
+import { Button, VerticalBox, HorizontalBox, LineEdit, Slider } from "std-widgets.slint";
+
+export component VideoPlayerUI inherits Window {
+    title: "Video Player";
+    preferred-width: 1300px;
+    preferred-height: 700px;
+    
+    // プロパティ
+    in-out property <string> video-path: "";
+    in-out property <int> repeat-count: 1;
+    in-out property <float> current-time: 0.0;
+    in-out property <float> duration: 0.0;
+    in-out property <bool> is-playing: false;
+    in-out property <image> video-frame;
+    in-out property <float> volume: 1.0; // 0.0 ~ 1.0
+    in-out property <bool> fullscreen-mode: false;
+    
+    // コールバック
+    callback select-video();
+    callback play-pause();
+    callback stop();
+    callback seek(float);
+    callback repeat-changed(int);
+    callback volume-changed(float);
+    
+    // キー入力を捕捉するためのFocusScope
+    FocusScope {
+        width: 100%;
+        height: 100%;
+        
+        key-pressed(event) => {
+            // Ctrl + Alt で全画面切り替え
+            if (event.text == "" && event.modifiers.control && event.modifiers.alt) {
+                fullscreen-mode = !fullscreen-mode;
+                return accept;
+            }
+            // Escape で全画面解除
+            if (event.text == "\u{1b}" && fullscreen-mode) {
+                fullscreen-mode = false;
+                return accept;
+            }
+            return reject;
+        }
+        
+        // 通常モード
+        if !fullscreen-mode: VerticalBox {
+        padding: 20px;
+        spacing: 10px;
+        
+        // メインコンテンツエリア
+        HorizontalBox {
+            spacing: 20px;
+            
+            // 動画表示エリア（左側・960x600固定）
+            Rectangle {
+                width: 960px;
+                height: 600px;
+                background: #000000;
+                border-width: 2px;
+                border-color: #333333;
+                border-radius: 8px;
+                
+                if video-frame.width > 0: Image {
+                    source: video-frame;
+                    width: 100%;
+                    height: 100%;
+                    image-fit: contain;
+                }
+                
+                if video-frame.width == 0: Text {
+                    text: video-path == "" ? "動画ファイルを選択してください" : "動画準備中...";
+                    color: #ffffff;
+                    font-size: 20px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            
+            // コントロールパネル（右側）
+            VerticalBox {
+                spacing: 12px;
+                width: 280px;
+                
+                // ファイル選択エリア
+                VerticalBox {
+                    spacing: 4px;
+                    
+                    Text {
+                        text: "動画ファイル";
+                        font-size: 16px;
+                        font-weight: 700;
+                    }
+                    
+                    Rectangle {
+                        border-width: 1px;
+                        border-color: #cccccc;
+                        border-radius: 4px;
+                        background: white;
+                        height: 40px;
+                        
+                        VerticalLayout {
+                            padding: 6px;
+                            
+                            Text {
+                                text: video-path == "" ? "未選択" : video-path;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                                color: video-path == "" ? #999999 : #000000;
+                                overflow: elide;
+                                font-size: 11px;
+                            }
+                        }
+                    }
+                    
+                    Button {
+                        text: "📁 ファイルを選択...";
+                        clicked => {
+                            select-video();
+                        }
+                    }
+                }
+                
+                // リピート回数設定エリア
+                VerticalBox {
+                    spacing: 4px;
+                    
+                    Text {
+                        text: "リピート回数";
+                        font-size: 16px;
+                        font-weight: 700;
+                    }
+                    
+                    HorizontalBox {
+                        spacing: 8px;
+                        
+                        Button {
+                            text: "-";
+                            width: 45px;
+                            clicked => {
+                                if (repeat-count > 1) {
+                                    repeat-count -= 1;
+                                    repeat-changed(repeat-count);
+                                }
+                            }
+                        }
+                        
+                        LineEdit {
+                            text: repeat-count == -1 ? "∞" : repeat-count;
+                            horizontal-stretch: 1;
+                            horizontal-alignment: center;
+                            edited(new-text) => {
+                                if (new-text == "∞") {
+                                    repeat-count = -1;
+                                } else {
+                                    repeat-count = new-text.to-float();
+                                }
+                                repeat-changed(repeat-count);
+                            }
+                        }
+                        
+                        Button {
+                            text: "+";
+                            width: 45px;
+                            clicked => {
+                                if (repeat-count == -1) {
+                                    repeat-count = 1;
+                                }
+                                repeat-count += 1;
+                                repeat-changed(repeat-count);
+                            }
+                        }
+                    }
+                    
+                    Button {
+                        text: "∞ 無限リピート";
+                        clicked => {
+                            repeat-count = -1;
+                            repeat-changed(repeat-count);
+                        }
+                    }
+                }
+                
+                // ボリュームコントロール
+                VerticalBox {
+                    spacing: 4px;
+                    
+                    Text {
+                        text: "音量";
+                        font-size: 16px;
+                        font-weight: 700;
+                    }
+                    
+                    HorizontalBox {
+                        spacing: 10px;
+                        alignment: center;
+                        
+                        Text {
+                            text: volume == 0 ? "🔇" : volume < 0.5 ? "🔉" : "🔊";
+                            font-size: 20px;
+                            width: 30px;
+                        }
+                        
+                        Slider {
+                            minimum: 0;
+                            maximum: 1;
+                            value: volume;
+                            changed(new-value) => {
+                                volume = new-value;
+                                volume-changed(new-value);
+                            }
+                        }
+                        
+                        Text {
+                            text: Math.round(volume * 100) + "%";
+                            font-size: 12px;
+                            width: 45px;
+                            horizontal-alignment: right;
+                        }
+                    }
+                    
+                    HorizontalBox {
+                        spacing: 5px;
+                        
+                        Button {
+                            text: "0%";
+                            width: 60px;
+                            clicked => {
+                                volume = 0.0;
+                                volume-changed(volume);
+                            }
+                        }
+                        
+                        Button {
+                            text: "50%";
+                            width: 60px;
+                            clicked => {
+                                volume = 0.5;
+                                volume-changed(volume);
+                            }
+                        }
+                        
+                        Button {
+                            text: "100%";
+                            width: 60px;
+                            clicked => {
+                                volume = 1.0;
+                                volume-changed(volume);
+                            }
+                        }
+                    }
+                }
+                
+                // 再生コントロール
+                VerticalBox {
+                    spacing: 4px;
+                    
+                    Text {
+                        text: "再生コントロール";
+                        font-size: 16px;
+                        font-weight: 700;
+                    }
+                    
+                    Button {
+                        text: is-playing ? "⏸ 一時停止" : "▶ 再生";
+                        primary: true;
+                        clicked => {
+                            play-pause();
+                        }
+                    }
+                    
+                    Button {
+                        text: "⏹ 停止";
+                        clicked => {
+                            stop();
+                        }
+                    }
+                }
+                
+                // 情報表示
+                Rectangle {
+                    border-width: 1px;
+                    border-color: #e0e0e0;
+                    border-radius: 4px;
+                    background: #f5f5f5;
+                    padding: 12px;
+                    
+                    VerticalBox {
+                        spacing: 5px;
+                        
+                        Text {
+                            text: "ステータス";
+                            font-size: 14px;
+                            font-weight: 700;
+                        }
+                        
+                        Text {
+                            text: is-playing ? "▶ 再生中" : "⏸ 停止";
+                            color: is-playing ? #00aa00 : #666666;
+                            font-size: 13px;
+                        }
+                        
+                        Text {
+                            text: "時間: " + format-time(current-time) + " / " + format-time(duration);
+                            color: #666666;
+                            font-size: 12px;
+                        }
+                        
+                        Text {
+                            text: repeat-count == -1 ? "リピート: 無限" : "リピート: " + repeat-count + "回";
+                            color: #666666;
+                            font-size: 12px;
+                        }
+                    }
+                }
+                
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+            }
+        }
+        
+        // シークバー
+        Rectangle {
+            background: #f8f8f8;
+            border-radius: 6px;
+            padding: 10px;
+            
+            HorizontalBox {
+                spacing: 12px;
+                
+                Text {
+                    text: format-time(current-time);
+                    width: 60px;
+                    vertical-alignment: center;
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #333333;
+                }
+                
+                Slider {
+                    horizontal-stretch: 1;
+                    minimum: 0;
+                    maximum: duration > 0 ? duration : 100;
+                    value: current-time;
+                    changed(new-value) => {
+                        seek(new-value);
+                    }
+                }
+                
+                Text {
+                    text: format-time(duration);
+                    width: 60px;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: #333333;
+                }
+            }
+        }
+    }
+        
+        // 全画面モード
+        if fullscreen-mode: Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #000000;
+            
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+                
+                // 動画表示エリア（全画面の大部分）
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: #000000;
+                    
+                    if video-frame.width > 0: Image {
+                        source: video-frame;
+                        width: 100%;
+                        height: 100%;
+                        image-fit: contain;
+                    }
+                    
+                    if video-frame.width == 0: Text {
+                        text: video-path == "" ? "動画ファイルを選択してください" : "動画準備中...";
+                        color: #ffffff;
+                        font-size: 28px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // 下部コントロールエリア
+                Rectangle {
+                    background: rgba(0, 0, 0, 0.85);
+                    height: 120px;
+                    
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 15px;
+                        
+                        // シークバー
+                        HorizontalBox {
+                            spacing: 15px;
+                            
+                            Text {
+                                text: format-time(current-time);
+                                width: 70px;
+                                vertical-alignment: center;
+                                font-size: 16px;
+                                font-weight: 600;
+                                color: #ffffff;
+                            }
+                            
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: duration > 0 ? duration : 100;
+                                value: current-time;
+                                changed(new-value) => {
+                                    seek(new-value);
+                                }
+                            }
+                            
+                            Text {
+                                text: format-time(duration);
+                                width: 70px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                font-size: 16px;
+                                font-weight: 600;
+                                color: #ffffff;
+                            }
+                        }
+                        
+                        // 音量バー
+                        HorizontalBox {
+                            spacing: 15px;
+                            alignment: center;
+                            
+                            Text {
+                                text: volume == 0 ? "🔇" : volume < 0.5 ? "🔉" : "🔊";
+                                font-size: 24px;
+                                width: 40px;
+                            }
+                            
+                            Text {
+                                text: "音量:";
+                                color: #ffffff;
+                                font-size: 14px;
+                                width: 50px;
+                            }
+                            
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: 1;
+                                value: volume;
+                                changed(new-value) => {
+                                    volume = new-value;
+                                    volume-changed(new-value);
+                                }
+                            }
+                            
+                            Text {
+                                text: Math.round(volume * 100) + "%";
+                                font-size: 14px;
+                                width: 60px;
+                                horizontal-alignment: right;
+                                color: #ffffff;
+                            }
+                            
+                            Text {
+                                text: "Esc: 終了";
+                                font-size: 12px;
+                                color: #aaaaaa;
+                                width: 80px;
+                                horizontal-alignment: right;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // 時間フォーマット関数
+    pure function format-time(seconds: float) -> string {
+        Math.floor(seconds / 60) + ":" + 
+        (Math.floor(Math.mod(seconds, 60)) < 10 ? "0" : "") + 
+        Math.floor(Math.mod(seconds, 60))
+    }
+}
