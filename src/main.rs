@@ -153,8 +153,45 @@ fn main() {
             // 現在の再生時間を更新（再生中のみ）
             let is_playing = player.is_playing();
             let current = player.get_current_time();
+            let video_finished = player.is_video_finished();
             if is_playing {
                 ui.set_current_time(current);
+            }
+            
+            // 動画終了時: シークバーを最後まで移動 & リピート処理
+            if video_finished {
+                // 確実にシークバーを最後まで移動（レースコンディション対策でdurationを直接使用）
+                ui.set_current_time(player.duration);
+                ui.set_is_playing(false);
+                drop(player); // ロックを解放
+                
+                let mut player = player_clone.lock().unwrap();
+                player.clear_video_finished();
+                
+                let repeat_count = ui.get_repeat_count();
+                if repeat_count == -1 {
+                    // 無限リピート
+                    player.stop();
+                    let _ = player.play();
+                    ui.set_is_playing(true);
+                    ui.set_current_time(0.0); // シークバーを先頭に戻す
+                    println!("リピート再生（無限）");
+                } else if repeat_count > 1 {
+                    // リピートカウント減少
+                    ui.set_repeat_count(repeat_count - 1);
+                    player.stop();
+                    let _ = player.play();
+                    ui.set_is_playing(true);
+                    ui.set_current_time(0.0); // シークバーを先頭に戻す
+                    println!("リピート再生（残り: {}回）", repeat_count - 1);
+                } else {
+                    // 再生終了 - 映像が先頭に戻るのでシークバーも先頭に戻す
+                    player.stop();
+                    ui.set_current_time(0.0);
+                    ui.set_is_playing(false);
+                    println!("再生完了");
+                }
+                return; // このティックはここで終了
             }
             
             // 再生状態を同期
@@ -172,28 +209,6 @@ fn main() {
                     height,
                 );
                 ui.set_video_frame(Image::from_rgba8(buffer));
-            }
-            
-            // 動画終了時の処理
-            if is_playing && current >= player.duration && player.duration > 0.0 {
-                drop(player); // ロックを解放
-                let mut player = player_clone.lock().unwrap();
-                
-                let repeat_count = ui.get_repeat_count();
-                if repeat_count == -1 {
-                    // 無限リピート
-                    player.stop();
-                    let _ = player.play();
-                } else if repeat_count > 1 {
-                    // リピートカウント減少
-                    ui.set_repeat_count(repeat_count - 1);
-                    player.stop();
-                    let _ = player.play();
-                } else {
-                    // 再生終了
-                    player.stop();
-                    ui.set_is_playing(false);
-                }
             }
         },
     );

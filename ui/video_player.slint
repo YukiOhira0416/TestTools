@@ -154,7 +154,7 @@ export component VideoPlayerUI inherits Window {
                             horizontal-stretch: 1;
                             minimum: 0;
                             maximum: duration > 0 ? duration : 100;
-                            value: current-time;
+                            value <=> current-time;
                             changed(new-value) => {
                                 seek(new-value);
                             }
@@ -459,7 +459,7 @@ export component VideoPlayerUI inherits Window {
                             horizontal-stretch: 1;
                             minimum: 0;
                             maximum: duration > 0 ? duration : 100;
-                            value: current-time;
+                            value <=> current-time;
                             changed(new-value) => {
                                 seek(new-value);
                             }

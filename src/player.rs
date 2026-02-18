@@ -8,8 +8,10 @@ use image::RgbaImage;
 
 pub struct VideoPlayer {
     pub duration: f32,
+    pub fps: f32,
     pub is_playing: Arc<Mutex<bool>>,
     pub is_paused: Arc<Mutex<bool>>,
+    pub video_finished: Arc<Mutex<bool>>,
     pub current_time: Arc<Mutex<f32>>,
     pub current_frame: Arc<Mutex<Option<RgbaImage>>>,
     pub seek_time: Arc<Mutex<Option<f32>>>,
@@ -26,8 +28,10 @@ impl VideoPlayer {
     pub fn new() -> Self {
         Self {
             duration: 0.0,
+            fps: 30.0,
             is_playing: Arc::new(Mutex::new(false)),
             is_paused: Arc::new(Mutex::new(false)),
+            video_finished: Arc::new(Mutex::new(false)),
             current_time: Arc::new(Mutex::new(0.0)),
             current_frame: Arc::new(Mutex::new(None)),
             seek_time: Arc::new(Mutex::new(None)),
@@ -46,11 +50,12 @@ impl VideoPlayer {
         
         // 動画の情報を取得
         match self.get_video_info(&path) {
-            Ok((duration, width, height)) => {
+            Ok((duration, fps, width, height)) => {
                 self.duration = duration;
+                self.fps = fps;
                 self.video_width = width;
                 self.video_height = height;
-                println!("動画を読み込みました: {} ({}秒, {}x{})", path.display(), duration, width, height);
+                println!("動画を読み込みました: {} ({}秒, {}x{}, {:.2}fps)", path.display(), duration, width, height, fps);
                 
                 // 最初のフレームを読み込む
                 self.load_first_frame(&path)?;
@@ -67,14 +72,15 @@ impl VideoPlayer {
         }
     }
 
-    fn get_video_info(&self, path: &PathBuf) -> Result<(f32, u32, u32), String> {
-        // ffprobeで動画情報を取得
+    fn get_video_info(&self, path: &PathBuf) -> Result<(f32, f32, u32, u32), String> {
+        // ffprobeで動画情報を取得（avg_frame_rateで正確なfpsを取得）
         let output = Command::new("ffprobe")
             .args(&[
                 "-v", "error",
                 "-select_streams", "v:0",
-                "-show_entries", "stream=width,height,duration",
-                "-of", "csv=p=0",
+                "-show_entries", "stream=width,height,avg_frame_rate",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1",
                 path.to_str().unwrap(),
             ])
             .output();
@@ -82,23 +88,66 @@ impl VideoPlayer {
         match output {
             Ok(output) if output.status.success() => {
                 let info_str = String::from_utf8_lossy(&output.stdout);
-                let parts: Vec<&str> = info_str.trim().split(',').collect();
                 
-                if parts.len() >= 3 {
-                    let width = parts[0].parse::<u32>().unwrap_or(1280);
-                    let height = parts[1].parse::<u32>().unwrap_or(720);
-                    let duration = parts[2].parse::<f32>().unwrap_or(0.0);
-                    
-                    // 1280x720にスケーリング
+                let mut width: u32 = 1280;
+                let mut height: u32 = 720;
+                let mut duration: f32 = 0.0;
+                let mut fps: f32 = 30.0;
+                
+                // key=value 形式で解析
+                for line in info_str.lines() {
+                    let line = line.trim();
+                    if let Some((key, value)) = line.split_once('=') {
+                        match key {
+                            "width" => {
+                                if let Ok(w) = value.parse::<u32>() {
+                                    width = w;
+                                }
+                            }
+                            "height" => {
+                                if let Ok(h) = value.parse::<u32>() {
+                                    height = h;
+                                }
+                            }
+                            "avg_frame_rate" => {
+                                if let Some(parsed_fps) = Self::parse_frame_rate(value) {
+                                    fps = parsed_fps;
+                                }
+                            }
+                            "duration" => {
+                                if let Ok(d) = value.parse::<f32>() {
+                                    if d > 0.0 {
+                                        duration = d;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                
+                if duration > 0.0 {
                     let (scaled_width, scaled_height) = self.calculate_scaled_size(width, height);
-                    
-                    Ok((duration, scaled_width, scaled_height))
+                    println!("動画情報: {}x{} → {}x{}, duration={:.2}秒, avg_fps={:.2}", width, height, scaled_width, scaled_height, duration, fps);
+                    Ok((duration, fps, scaled_width, scaled_height))
                 } else {
-                    Err("動画情報の解析に失敗".to_string())
+                    Err("動画のdurationを取得できませんでした".to_string())
                 }
             }
             _ => Err("ffprobeが利用できません".to_string())
         }
+    }
+    
+    fn parse_frame_rate(s: &str) -> Option<f32> {
+        if let Some((num_str, den_str)) = s.split_once('/') {
+            if let (Ok(num), Ok(den)) = (num_str.trim().parse::<f32>(), den_str.trim().parse::<f32>()) {
+                if den > 0.0 {
+                    return Some(num / den);
+                }
+            }
+        }
+        // 分数でなければ直接パース
+        s.trim().parse::<f32>().ok().filter(|&v| v > 0.0)
     }
 
     fn calculate_scaled_size(&self, orig_width: u32, orig_height: u32) -> (u32, u32) {
@@ -164,6 +213,15 @@ impl VideoPlayer {
         if let Some(path) = &self.video_path {
             *self.is_playing.lock().unwrap() = true;
             *self.is_paused.lock().unwrap() = false;
+            *self.video_finished.lock().unwrap() = false;
+            
+            // メインスレッドでseek_timeを読み取り・クリア（レースコンディション防止）
+            let start_position = {
+                let mut seek = self.seek_time.lock().unwrap();
+                let pos = seek.unwrap_or(0.0);
+                *seek = None;
+                pos
+            };
             
             // 再生世代をインクリメント
             let generation = {
@@ -175,21 +233,25 @@ impl VideoPlayer {
             let path_str = path.to_str().unwrap().to_string();
             let is_playing = Arc::clone(&self.is_playing);
             let is_paused = Arc::clone(&self.is_paused);
+            let video_finished = Arc::clone(&self.video_finished);
             let current_time = Arc::clone(&self.current_time);
             let current_frame = Arc::clone(&self.current_frame);
-            let seek_time = Arc::clone(&self.seek_time);
             let playback_generation = Arc::clone(&self.playback_generation);
             let duration = self.duration;
+            let fps = self.fps;
             let width = self.video_width;
             let height = self.video_height;
             
-            // 音声再生を開始
-            self.start_audio_playback()?;
-            
-            // 別スレッドで動画を再生
+            // 別スレッドで動画を再生（start_positionをパラメータとして渡す）
+            // 音声より先にスレッドを生成（音声失敗で動画が止まるのを防止）
             thread::spawn(move || {
-                Self::play_video_with_frames(&path_str, is_playing, is_paused, current_time, current_frame, seek_time, playback_generation, generation, duration, width, height);
+                Self::play_video_with_frames(&path_str, is_playing, is_paused, video_finished, current_time, current_frame, playback_generation, generation, duration, fps, width, height, start_position);
             });
+            
+            // 音声再生を開始（失敗しても動画は再生し続ける）
+            if let Err(e) = self.start_audio_playback() {
+                println!("音声再生の開始に失敗（動画は継続）: {}", e);
+            }
             
             Ok(())
         } else {
@@ -201,36 +263,34 @@ impl VideoPlayer {
         path: &str,
         is_playing: Arc<Mutex<bool>>,
         is_paused: Arc<Mutex<bool>>,
+        video_finished: Arc<Mutex<bool>>,
         current_time: Arc<Mutex<f32>>,
         current_frame: Arc<Mutex<Option<RgbaImage>>>,
-        seek_time: Arc<Mutex<Option<f32>>>,
         playback_generation: Arc<Mutex<u64>>,
         my_generation: u64,
         duration: f32,
+        fps: f32,
         width: u32,
         height: u32,
+        start_position: f32,
     ) {
-        // シーク位置を取得
-        let start_position = {
-            let mut seek = seek_time.lock().unwrap();
-            let pos = seek.unwrap_or(0.0);
-            *seek = None; // 使用後クリア
-            pos
-        };
+        // start_positionはplay()のメインスレッドで確定済み（レースコンディション防止）
         
         println!("ffmpegで動画を再生中... (開始位置: {}秒, 世代: {})", start_position, my_generation);
         
         // ffmpegでrawvideo形式でフレームを出力（RGBA形式）
+        // -r で出力fps固定、自前でフレームタイミングを制御
         let mut args = vec![
             "-ss".to_string(),
             start_position.to_string(),
         ];
         args.extend_from_slice(&[
-            "-re".to_string(), // リアルタイム再生
             "-i".to_string(),
             path.to_string(),
             "-vf".to_string(),
             format!("scale={}:{}", width, height),
+            "-r".to_string(),
+            format!("{}", fps),
             "-f".to_string(),
             "rawvideo".to_string(),
             "-pix_fmt".to_string(),
@@ -253,11 +313,13 @@ impl VideoPlayer {
         };
 
         let mut stdout = child.stdout.take().unwrap();
-        let start_time = Instant::now();
         
-        // 一時停止時間の追跡
-        let mut pause_start: Option<Instant> = None;
-        let mut total_paused_secs: f32 = 0.0;
+        // フレームカウントと壁時計を併用した時間追跡
+        let mut frame_count: u64 = 0;
+        let frame_duration_secs = 1.0_f64 / fps as f64;
+        let playback_start = Instant::now();
+        let mut total_paused: Duration = Duration::ZERO;
+        let mut pause_start_time: Option<Instant> = None;
         
         // 1フレームのサイズを計算（RGBA = 4バイト/ピクセル）
         let frame_size = (width * height * 4) as usize;
@@ -271,25 +333,16 @@ impl VideoPlayer {
                 break;
             }
             
-            // シーク要求をチェック
-            if seek_time.lock().unwrap().is_some() {
-                // 新しいシーク要求があるため、現在の再生を停止
-                let _ = child.kill();
-                println!("シーク要求により再生を中断");
-                break;
-            }
-            
             // 一時停止チェック: ffmpegプロセスは生かしたまま待機（停止チェックより先）
             if *is_paused.lock().unwrap() {
-                if pause_start.is_none() {
-                    pause_start = Some(Instant::now());
+                if pause_start_time.is_none() {
+                    pause_start_time = Some(Instant::now());
                 }
                 thread::sleep(Duration::from_millis(30));
                 continue;
-            } else if let Some(ps) = pause_start.take() {
+            } else if let Some(ps) = pause_start_time.take() {
                 // 一時停止から復帰: 停止していた時間を累積
-                total_paused_secs += ps.elapsed().as_secs_f32();
-                println!("一時停止から復帰（停止時間: {:.2}秒, 累積: {:.2}秒）", ps.elapsed().as_secs_f32(), total_paused_secs);
+                total_paused += ps.elapsed();
             }
             
             // 停止チェック（一時停止でない場合のみ到達）
@@ -299,12 +352,27 @@ impl VideoPlayer {
                 break;
             }
 
-            let elapsed = start_time.elapsed().as_secs_f32() - total_paused_secs + start_position;
-            *current_time.lock().unwrap() = elapsed;
+            // フレーム数ベースで現在の動画内位置を計算
+            let current_pos = start_position + (frame_count as f32) * (frame_duration_secs as f32);
+            
+            // 世代が一致する場合のみcurrent_timeを更新（古いスレッドが新しい再生の時間を上書きしないように）
+            if *playback_generation.lock().unwrap() != my_generation {
+                let _ = child.kill();
+                println!("current_time更新前に世代不一致を検出（世代: {}）", my_generation);
+                break;
+            }
+            *current_time.lock().unwrap() = current_pos;
 
-            if elapsed >= duration && duration > 0.0 {
-                *is_playing.lock().unwrap() = false;
-                println!("再生が終了しました");
+            if current_pos >= duration && duration > 0.0 {
+                // 世代が一致する場合のみ終了フラグを設定（古いスレッドが新しい再生を壊さないように）
+                if *playback_generation.lock().unwrap() == my_generation {
+                    *current_time.lock().unwrap() = duration;
+                    *is_playing.lock().unwrap() = false;
+                    *video_finished.lock().unwrap() = true;
+                    println!("再生が終了しました (frame: {}, pos: {:.2}, duration: {:.2})", frame_count, current_pos, duration);
+                } else {
+                    println!("古いスレッド（世代: {}）がduration超過で終了（フラグ設定スキップ）", my_generation);
+                }
                 break;
             }
 
@@ -313,9 +381,15 @@ impl VideoPlayer {
             while pos < frame_size {
                 match stdout.read(&mut frame_buffer[pos..]) {
                     Ok(0) => {
-                        // EOFに達した
-                        *is_playing.lock().unwrap() = false;
-                        println!("動画の終端に達しました");
+                        // EOFに達した - 世代が一致する場合のみ終了フラグを設定
+                        if *playback_generation.lock().unwrap() == my_generation {
+                            *current_time.lock().unwrap() = duration;
+                            *is_playing.lock().unwrap() = false;
+                            *video_finished.lock().unwrap() = true;
+                            println!("動画の終端に達しました（世代: {}）", my_generation);
+                        } else {
+                            println!("古いスレッド（世代: {}）がEOFで終了（フラグ設定スキップ）", my_generation);
+                        }
                         let _ = child.kill();
                         return;
                     }
@@ -324,7 +398,12 @@ impl VideoPlayer {
                     }
                     Err(e) => {
                         println!("読み込みエラー: {}", e);
-                        *is_playing.lock().unwrap() = false;
+                        // 世代が一致する場合のみ終了フラグを設定
+                        if *playback_generation.lock().unwrap() == my_generation {
+                            *current_time.lock().unwrap() = duration;
+                            *is_playing.lock().unwrap() = false;
+                            *video_finished.lock().unwrap() = true;
+                        }
                         let _ = child.kill();
                         return;
                     }
@@ -335,8 +414,16 @@ impl VideoPlayer {
             if let Some(rgba_image) = RgbaImage::from_raw(width, height, frame_buffer.clone()) {
                 *current_frame.lock().unwrap() = Some(rgba_image);
             }
+            
+            // フレームカウントをインクリメント（時間追跡用）
+            frame_count += 1;
 
-            // フレームレートを調整するための待機は不要（-reオプションで自動調整）
+            // 自前フレームペーシング: 次のフレームの表示タイミングまでスリープ
+            let expected_elapsed = Duration::from_secs_f64(frame_count as f64 * frame_duration_secs);
+            let actual_elapsed = playback_start.elapsed() - total_paused;
+            if expected_elapsed > actual_elapsed {
+                thread::sleep(expected_elapsed - actual_elapsed);
+            }
         }
 
         let _ = child.wait();
@@ -354,6 +441,7 @@ impl VideoPlayer {
     pub fn stop(&mut self) {
         *self.is_paused.lock().unwrap() = false;
         *self.is_playing.lock().unwrap() = false;
+        *self.video_finished.lock().unwrap() = false;
         *self.current_time.lock().unwrap() = 0.0;
         self.stop_audio();
         
@@ -445,6 +533,14 @@ impl VideoPlayer {
 
     pub fn is_playing(&self) -> bool {
         *self.is_playing.lock().unwrap()
+    }
+    
+    pub fn is_video_finished(&self) -> bool {
+        *self.video_finished.lock().unwrap()
+    }
+    
+    pub fn clear_video_finished(&mut self) {
+        *self.video_finished.lock().unwrap() = false;
     }
 
     pub fn get_current_frame(&self) -> Option<RgbaImage> {
